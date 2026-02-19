@@ -2,6 +2,7 @@ import os
 from hashlib import sha3_256, sha3_512, shake_128, shake_256
 from ..modules.modules import Module
 from ..utilities.utils import select_bytes
+import copy
 
 
 class Kyber:
@@ -116,6 +117,7 @@ class Kyber:
             input_bytes = self._prf(sigma, bytes([N]), 64 * eta)
             elements[i] = self.R.cbd(input_bytes, eta)
             N += 1
+
         v = self.M.vector(elements)
         return v, N
 
@@ -138,10 +140,13 @@ class Kyber:
         A_data = [
             [self.R.zero() for _ in range(self.k)] for _ in range(self.k)
         ]
+
+
         for i in range(self.k):
             for j in range(self.k):
                 input_bytes = self._xof(rho, bytes([j]), bytes([i]))
                 A_data[i][j] = self.R.ntt_sample(input_bytes)
+
         A_hat = self.M(A_data, transpose=transpose)
         return A_hat
 
@@ -177,15 +182,63 @@ class Kyber:
 
         # Construct the public key
         t_hat = (A_hat @ s_hat) + e_hat
-
         # Reduce vectors mod^+ q
         t_hat.reduce_coefficients()
+
         s_hat.reduce_coefficients()
 
         # Encode elements to bytes and return
         pk = t_hat.encode(12) + rho
         sk = s_hat.encode(12)
         return pk, sk
+
+    def _cpapke_enc_without_compress(self, pk, m, coins):
+        """
+        Algorithm 5 (Encryption) - WITHOUT COMPRESSION
+        Modified version that skips compression for u and v
+
+        :param bytes pk: byte-encoded public key
+        :param bytes m: a 32-byte message
+        :param bytes coins: a 32-byte random value
+        :return: the ciphertext c
+        :rtype: bytes
+        """
+        # Unpack the public key
+        t_hat_bytes, rho = pk[:-32], pk[-32:]
+
+        # Decode t_hat vector from public key
+        t_hat = self.M.decode_vector(t_hat_bytes, self.k, 12, is_ntt=True)
+
+        # Encode message as polynomial
+        m_poly = self.R.decode(m, 1).decompress(1)
+
+        # Generate the matrix A^T ∈ R^(kxk)
+        A_hat_T = self._generate_matrix_from_seed(rho, transpose=True)
+
+        # Set counter for PRF
+        N = 0
+
+        # Generate the error vector r ∈ R^k
+        r, N = self._generate_error_vector(coins, self.eta_1, N)
+        r_hat = r.to_ntt()
+
+        # Generate the error vector e1 ∈ R^k
+        e1, N = self._generate_error_vector(coins, self.eta_2, N)
+
+        # Generate the error polynomial e2 ∈ R
+        e2, N = self._generate_polynomial(coins, self.eta_2, N)
+
+        # Module/Polynomial arithmetic
+        u = (A_hat_T @ r_hat).from_ntt() + e1
+        v = t_hat.dot(r_hat).from_ntt()
+        v = v + e2 + m_poly
+
+        # Ciphertext to bytes WITHOUT compression
+        # Using full 12-bit encoding for both u and v
+        c1 = u.encode(12)
+        c2 = v.encode(12)
+
+        return c1 + c2
 
     def _cpapke_enc(self, pk, m, coins):
         """
@@ -254,6 +307,39 @@ class Kyber:
 
         # Recover the polynomial v
         v = self.R.decode(c2, self.dv).decompress(self.dv)
+
+        # s_transpose (already in NTT form)
+        s_hat = self.M.decode_vector(sk, self.k, 12, is_ntt=True)
+
+        # Recover message as polynomial
+        m = (s_hat.dot(u_hat)).from_ntt()
+        m = v - m
+
+        # Return message as bytes
+        return m.compress(1).encode(1)
+
+
+    def _cpapke_dec_without_compress(self, sk, c):
+        """
+        Algorithm 6 (Decryption) - WITHOUT DECOMPRESSION
+        Modified version that skips decompression for u and v
+
+        :param bytes sk: byte-encoded secret key
+        :param bytes c: ciphertext (from _cpapke_enc_without_compress)
+        :return: the message m
+        :rtype: bytes
+        """
+        # Split ciphertext to vectors
+        # Using 12-bit encoding instead of du/dv
+        index = 12 * self.k * self.R.n // 8
+        c1, c2 = c[:index], c[index:]
+
+        # Recover the vector u and convert to NTT form WITHOUT decompression
+        u = self.M.decode_vector(c1, self.k, 12)
+        u_hat = u.to_ntt()
+
+        # Recover the polynomial v WITHOUT decompression
+        v = self.R.decode(c2, 12)
 
         # s_transpose (already in NTT form)
         s_hat = self.M.decode_vector(sk, self.k, 12, is_ntt=True)

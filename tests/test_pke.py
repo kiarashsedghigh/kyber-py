@@ -9,7 +9,6 @@ if __name__ == "__main__":
     pk , sk = kyber._cpapke_keygen()
 
     m = "Kiarash"
-
     c = kyber._cpapke_enc(pk,
                           m.encode().ljust(32, b'\x00')
                           , token_bytes(32))

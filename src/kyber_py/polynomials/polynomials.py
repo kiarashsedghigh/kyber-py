@@ -68,6 +68,7 @@ class PolynomialRing(GenericPolynomialRing):
         assert 64 * eta == len(input_bytes)
         coefficients = [0 for _ in range(256)]
         b_int = int.from_bytes(input_bytes, "little")
+
         mask = (1 << eta) - 1
         mask2 = (1 << 2 * eta) - 1
         for i in range(256):
